@@ -1,0 +1,384 @@
+---
+title: 'METHOD IV: ESCALATION'
+author: "LABARTHE, S."
+date: "2026-04-30"
+output: pdf_document
+---
+
+# CODEBOOK
+
+* `mid` - Militarized Interstate Dispute onset the next year
+* `country1` - First state in the dyad
+* `country2` - Second state in the dyad
+* `dyad_id` - Dyad Identifiant 
+* `year` - Calendar year
+* `fatality` - Fatality (0-1)
+* `hostlev` - Hostility level
+* `mindur` - Minimum dispute duration (log days)
+* `maxdur` - Maximum dispute duration (log days)
+* `recip` - Reciprocation
+* `max_fatality` - Maximum fatality level across dyad
+* `min_fatality` - Minimum fatality level across dyad
+* `max_hiact` - Maximum highest action level across dyad (0-21 scale)
+* `min_hiact` - Minimum highest action level across dyad (0-21 scale)
+* `max_hostlev` - Maximum hostility level across dyad
+* `min_hostlev` - Minimum hostility level across dyad
+* `max_milex` - Maximum military expenditure (thousands USD)
+* `min_milex` - Minimum military expenditure (thousands USD)
+* `max_milper` - Maximum military personnel (thousands)
+* `min_milper` - Minimum military personnel (thousands)
+* `max_irst` - Maximum industrial capacity (0-100 scale)
+* `min_irst` - Minimum industrial capacity (0-100 scale)
+* `max_pec` - Maximum primary energy consumption (coal-ton equivalents)
+* `min_pec` - Minimum primary energy consumption (coal-ton equivalents)
+* `max_tpop` - Maximum total population (thousands)
+* `min_tpop` - Minimum total population (thousands)
+* `max_upop` - Maximum urban population (thousands)
+* `min_upop` - Minimum urban population (thousands)
+* `max_cinc` - Maximum Composite Index of National Capability (0-1 scale)
+* `min_cinc` - Minimum Composite Index of National Capability (0-1 scale)
+* `wbgdp2011est1` - GDP estimate country1 (2011 USD, log)
+* `wbgdp2011est2` - GDP estimate country2 (2011 USD, log)
+* `max_wbgdp2011est` - Maximum GDP across dyad (log)
+* `min_wbgdp2011est` - Minimum GDP across dyad (log)
+* `ratio_gdp` - Ratio of smaller to larger GDP
+* `max_wbpopest` - Maximum population across dyad (log)
+* `min_wbpopest` - Minimum population across dyad (log)
+* `ratio_pop` - Ratio of smaller to larger population
+* `max_sdpest` - Maximum share of dyadic population (log)
+* `min_sdpest` - Minimum share of dyadic population (log)
+* `max_wbgdppc2011est` - Maximum GDP per capita (2011 USD, log)
+* `min_wbgdppc2011est` - Minimum GDP per capita (2011 USD, log)
+* `ratio_gdppc` - Ratio of smaller to larger GDP per capita
+* `max_mrgdppc` - Maximum Maddison GDP per capita
+* `min_mrgdppc` - Minimum Maddison GDP per capita
+* `max_sd_mrgdppc` - Maximum standard deviation of GDP per capita
+* `min_sd_mrgdppc` - Minimum standard deviation of GDP per capita
+* `max_pwtrgdp` - Maximum Penn World Table GDP
+* `min_pwtrgdp` - Minimum Penn World Table GDP
+* `max_sd_pwtrgdp` - Maximum standard deviation of PWT GDP
+* `min_sd_pwtrgdp` - Minimum standard deviation of PWT GDP
+* `max_pwtpop` - Maximum PWT population
+* `min_pwtpop` - Minimum PWT population
+* `max_sd_pwtpop` - Maximum standard deviation of PWT population
+* `min_sd_pwtpop` - Minimum standard deviation of PWT population
+* `trade_total` - Total trade flow (USD)
+* `trade_dep1` - Trade dependence country1 (flow1/GDP1)
+* `trade_dep2` - Trade dependence country2 (flow2/GDP2)
+* `max_trade_dep` - Maximum trade dependence across dyad
+* `min_trade_dep` - Minimum trade dependence across dyad
+* `ratio_trade` - Ratio of smaller to larger trade dependence
+* `max_democracy` - Maximum democracy score across dyad (0-1)
+* `min_democracy` - Minimum democracy score across dyad (0-1)
+* `joint_democracy` - Both states democratic
+* `land_contiguity` - Shared land border
+* `water_contiguity` - Shared water border (< 24 miles)
+* `capdist` - Capital distance (km)
+* `capdist_log` - Log-transformed capital distance
+* `atop_alliance` - Any formal alliance
+* `atop_defense` - Defense pact
+* `atop_neutral` - Neutrality agreement
+* `atop_nonagg` - Non-aggression treaty
+* `atop_consul` - Consultation/entente agreement
+* `dyadigos` - Number of shared IGO memberships
+* `max_leadertransition` - Maximum leadership transition
+* `min_leadertransition` - Minimum leadership transition
+* `max_irregular` - Maximum irregular leadership change
+* `min_irregular` - Minimum irregular leadership change
+* `max_n_leaders` - Maximum number of leaders
+* `min_n_leaders` - Minimum number of leaders
+* `positional` - Positional rivalry
+* `spatial` - Spatial rivalry
+* `ideological` - Ideological rivalry
+* `interventionary` - Interventionary rivalry
+* `ongoingrivalry` - Ongoing strategic rivalry
+* `mid_count_5yr` - Number of MID onsets in previous 5 years
+* `mid_lag1` - MID onset previous year
+* `mid_lag2` - MID onset 2 years prior
+* `mid_lag3` - MID onset 3 years prior
+* `peace_years` - Consecutive years without MID onset
+* `cowmaj1` - Country1 COW major power
+* `cowmaj2` - Country2 COW major power
+* `major1` - At least one major power in dyad
+* `majors2` - Both states major powers
+
+# DATA CONSTRUCTION
+```{r, eval = F, message = F, warning = F}
+rm(list=ls())
+library(peacesciencer)
+library(vdemdata)      
+library(unvotes)
+library(dplyr)
+library(tidyr)
+
+library(countrycode)
+library(haven)    
+library(readxl)
+
+# Base
+dyad_base <- create_dyadyears(
+  system   = "cow",   
+  directed = FALSE,     
+  subset_years = c(1946:2012)  
+) %>%
+  mutate(
+    country1 = countrycode(ccode1, "cown", "country.name"),
+    country2 = countrycode(ccode2, "cown", "country.name"),
+    dyad_id = paste0(pmin(country1, country2), "-", 
+                       pmax(country1, country2))
+  )
+
+# MIDS
+dyad_base <- dyad_base %>%
+  add_cow_mids() %>% 
+  mutate(
+    across(everything(), ~replace(., is.na(.), 0)),
+    fatality = ifelse(fatality == -9, 1, fatality), 
+    fatality1 = ifelse(fatality1 == -9, 1, fatality1), 
+    fatality2 = ifelse(fatality2 == -9, 1, fatality2),
+    max_fatality = pmax(fatality1, fatality2),
+    min_fatality = pmin(fatality1, fatality2),
+    max_hiact = pmax(hiact1, hiact2),
+    min_hiact = pmin(hiact1, hiact2),
+    max_hostlev = pmax(hostlev1, hostlev2),
+    min_hostlev = pmin(hostlev1, hostlev2), 
+    mid = as.integer(!is.na(hostlev) & hostlev >= 1)
+  ) %>% 
+  select(-cowmidongoing, -dispnum, -cowmidonset, -sidea1, -sidea2, 
+         -fatality1, -fatality2, -fatalpre1, -fatalpre2, 
+         -hiact1, -hiact2, -hostlev1, -hostlev2, -orig1, -orig2, -stmon)
+
+# CINC
+dyad_base <- dyad_base %>%
+  add_nmc() %>% 
+  mutate(
+    max_milex = pmax(milex1, milex2), 
+    min_milex = pmin(milex1, milex2), 
+    max_milper = pmax(milper1, milper2), 
+    min_milper = pmin(milper1, milper2), 
+    max_irst = pmax(irst1, irst2), 
+    min_irst = pmin(irst1, irst2), 
+    max_pec = pmax(pec1, pec2), 
+    min_pec = pmin(pec1, pec2),   
+    max_tpop = pmax(tpop1, tpop2), 
+    min_tpop = pmin(tpop1, tpop2), 
+    max_upop = pmax(upop1, upop2), 
+    min_upop = pmin(upop1, upop2), 
+    max_cinc = pmax(cinc1, cinc2), 
+    min_cinc = pmin(cinc1, cinc2), 
+    maxdur = log(maxdur + 1) , 
+    mindur = log(mindur + 1) 
+    ) %>% 
+  select(-milex1, -milper1, -irst1, -pec1, -tpop1, -upop1, -cinc1, 
+         -milex2, -milper2, -irst2, -pec2, -tpop2, -upop2, -cinc2)
+
+# Economy
+dyad_base <- dyad_base %>%
+  add_sdp_gdp() %>% 
+  mutate(
+    max_wbgdp2011est = pmax(wbgdp2011est1, wbgdp2011est2), 
+    min_wbgdp2011est = pmin(wbgdp2011est1, wbgdp2011est2), 
+    
+    ratio_gdp      = min_wbgdp2011est / max_wbgdp2011est,
+    
+    max_wbpopest = pmax(wbpopest1, wbpopest2), 
+    min_wbpopest = pmin(wbpopest1, wbpopest2), 
+    
+    ratio_pop    = min_wbpopest / max_wbpopest,
+
+    max_sdpest = pmax(sdpest1, sdpest2), 
+    min_sdpest = pmin(sdpest1, sdpest2), 
+    max_wbgdppc2011est = pmax(wbgdppc2011est1, wbgdppc2011est2), 
+    min_wbgdppc2011est = pmin(wbgdppc2011est1, wbgdppc2011est2), 
+    
+    ratio_gdppc    = min_wbgdppc2011est / max_wbgdppc2011est
+    ) %>% 
+  select(-wbpopest1, -sdpest1, -wbgdppc2011est1,
+         -wbpopest2, -sdpest2, -wbgdppc2011est2)
+
+dyad_base <- dyad_base %>% 
+  add_sim_gdp_pop() %>% 
+  mutate(
+    max_mrgdppc = pmax(mrgdppc1, mrgdppc2), 
+    min_mrgdppc = pmin(mrgdppc1, mrgdppc2), 
+    max_sd_mrgdppc = pmax(sd_mrgdppc1, sd_mrgdppc2), 
+    min_sd_mrgdppc = pmin(sd_mrgdppc1, sd_mrgdppc2), 
+    max_pwtrgdp = pmax(pwtrgdp1, pwtrgdp2), 
+    min_pwtrgdp = pmin(pwtrgdp1, pwtrgdp2), 
+    max_sd_pwtrgdp = pmax(sd_pwtrgdp1, sd_pwtrgdp2), 
+    min_sd_pwtrgdp = pmin(sd_pwtrgdp1, sd_pwtrgdp2),   
+    max_pwtpop = pmax(pwtpop1, pwtpop2), 
+    min_pwtpop = pmin(pwtpop1, pwtpop2), 
+    max_sd_pwtpop = pmax(sd_pwtpop1, sd_pwtpop2), 
+    min_sd_pwtpop = pmin(sd_pwtpop1, sd_pwtpop2)
+    ) %>% 
+  select(-mrgdppc1, -sd_mrgdppc1, -pwtrgdp1, -sd_pwtrgdp1, -pwtpop1, -sd_pwtpop1, 
+         -mrgdppc2, -sd_mrgdppc2, -pwtrgdp2, -sd_pwtrgdp2, -pwtpop2, -sd_pwtpop2)
+
+# Trade
+dyad_base <- dyad_base %>%
+  add_cow_trade() %>%
+  mutate(
+    trade_total    = flow1 + flow2,
+    trade_dep1     = flow1 / (wbgdp2011est1 + 1), 
+    trade_dep2     = flow2 / (wbgdp2011est2 + 1),  
+    max_trade_dep  = pmax(trade_dep1, trade_dep2),
+    min_trade_dep  = pmin(trade_dep1, trade_dep2), 
+    ratio_trade    = min_trade_dep / (max_trade_dep + 0.00001)
+  ) %>% 
+  select(-flow1, -flow2, -smoothflow1, -smoothflow2)
+
+# Domestic politics
+dyad_base <- dyad_base %>%
+  add_democracy() %>% 
+  mutate(
+    max_democracy  = pmax(v2x_polyarchy1, v2x_polyarchy2),
+    min_democracy  = pmin(v2x_polyarchy1, v2x_polyarchy2),
+    joint_democracy = ifelse(max_democracy > 0.5 & min_democracy > 0.5, 1, 0)
+  ) %>% 
+  select(-v2x_polyarchy1,-v2x_polyarchy2, -euds1, -euds2, -aeuds1, -aeuds2, -polity21, -polity22)
+
+dyad_base <- dyad_base %>%
+  add_archigos() %>%
+  mutate(
+    max_leadertransition = pmax(leadertransition1, leadertransition2, na.rm = TRUE),
+    min_leadertransition = pmin(leadertransition1, leadertransition2, na.rm = TRUE),
+    max_irregular        = pmax(irregular1, irregular2, na.rm = TRUE),
+    min_irregular        = pmin(irregular1, irregular2, na.rm = TRUE),
+    max_n_leaders        = pmax(n_leaders1, n_leaders2, na.rm = TRUE),
+    min_n_leaders        = pmin(n_leaders1, n_leaders2, na.rm = TRUE)) %>%
+  select(-leadertransition1, -irregular1, -n_leaders1, 
+         -leadertransition2, -irregular2, -n_leaders2) 
+
+# Geography
+
+dyad_base <- dyad_base %>%
+  add_contiguity() %>%
+  mutate(
+    land_contiguity   = as.integer(!is.na(conttype) & conttype == 1), 
+    water_contiguity  = as.integer(!is.na(conttype) & conttype == 2 | conttype ==3)
+  ) %>% 
+  select(-conttype)
+
+dyad_base <- dyad_base %>%
+  add_minimum_distance() %>%
+  mutate(mindist_log = log(mindist + 1)) %>%
+  select(-mindist)
+
+dyad_base <- dyad_base %>%
+  add_capital_distance() %>%
+  mutate(
+    capdist_log = log(capdist + 1)  
+  )
+
+# International 
+dyad_base <- dyad_base %>% 
+  add_atop_alliance() %>% 
+  mutate(atop_alliance = ifelse(is.na(atop_alliance), 0, atop_alliance)) %>% 
+  select(-atop_offense)
+
+dyad_base <- dyad_base %>%
+  add_igos() 
+
+dyad_base <- dyad_base %>%
+  add_strategic_rivalries() %>% 
+  select(-jan1obsid1, -dec31obsid1, -jan1obsid2, -dec31obsid2, -tssr_id, )
+
+# Final adjustments
+dyad_base <- dyad_base %>%
+  arrange(country1, country2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    mid_count_5yr   = zoo::rollsum(mid, k = 5, 
+                                   fill = NA, 
+                                   align = "right"),
+
+    mid_lag1        = lag(mid, 1),
+    mid_lag2        = lag(mid, 2),
+    mid_lag5        = lag(mid, 5),
+
+    peace_years     = sequence(rle(mid == 0)$lengths) * (mid == 0)
+  ) %>%
+  ungroup()
+
+attr(dyad_base, "ps_data_type") <- "dyad_year"
+attr(dyad_base, "ps_system")    <- "cow"
+
+dyad_base <- dyad_base %>% 
+  add_cow_majors() %>%
+  mutate(
+    major1  = as.integer(cowmaj1 == 1 | cowmaj2 == 1),  
+    majors2 = as.integer(cowmaj1 == 1 & cowmaj2 == 1)   
+  )
+
+# Lag + 1
+keep_cols <- c("country1", "country2", "year", "dyad_id", "mid")
+
+dyad_base <- dyad_base %>%
+  group_by(country1, country2) %>%       
+  mutate(
+    across(
+      -any_of(keep_cols),               
+      ~ lag(.x, n = 1)
+    )
+  ) %>%
+  ungroup()
+
+data <- dyad_base %>% 
+  filter(year >= 1992 & year <= 2012) %>% 
+  mutate(mid = as.factor(mid)) %>% 
+  select(mid, country1, country2, dyad_id, year, everything(), -ccode1, -ccode2) %>% 
+  arrange(country1, country2, year) %>% 
+  na.omit()
+
+test <- dyad_base %>% 
+  filter(year >= 1992 & year <= 2012) %>% 
+  mutate(mid = as.factor(lead(mid, 1))) %>% 
+  select(mid, country1, country2, dyad_id, year, everything(), -ccode1, -ccode2) %>% 
+  arrange(country1, country2, year)
+
+length(unique(dyad_base$dyad_id))
+
+length(unique(data$dyad_id))
+
+saveRDS(data, "data.rds")
+```
+
+# NEXT
+```{r}
+dyad_base <- dyad_base %>%
+  add_vdem(vars = c(
+    "v2lgfemleg",       # % women in lower chamber of parliament
+    "v2x_corr",         # political corruption index
+    "v2x_civlib",       # civil liberties index
+    "v2x_freexp_altinf" # freedom of expression & alternative info
+  )) %>%
+  mutate(
+    max_femleg  = pmax(v2lgfemleg1, v2lgfemleg2, na.rm = TRUE),
+    min_femleg  = pmin(v2lgfemleg1, v2lgfemleg2, na.rm = TRUE),
+    max_corr    = pmax(v2x_corr1, v2x_corr2, na.rm = TRUE),
+    min_corr    = pmin(v2x_corr1, v2x_corr2, na.rm = TRUE),
+    max_civlib  = pmax(v2x_civlib1, v2x_civlib2, na.rm = TRUE),
+    min_civlib  = pmin(v2x_civlib1, v2x_civlib2, na.rm = TRUE)
+  ) %>%
+  select(-v2lgfemleg1, -v2lgfemleg2, -v2x_corr1, -v2x_corr2,
+         -v2x_civlib1, -v2x_civlib2,
+         -v2x_freexp_altinf1, -v2x_freexp_altinf2)
+
+# V-Party: governing party ideology & nationalism
+dyad_base <- dyad_base %>%
+  add_vparty() %>%
+  mutate(
+    # Left-right ideology of governing party
+    max_govideology   = pmax(v2pariglef1, v2pariglef2, na.rm = TRUE),
+    min_govideology   = pmin(v2pariglef1, v2pariglef2, na.rm = TRUE),
+    ideological_dist  = abs(v2pariglef1 - v2pariglef2),  # ideological distance between govts
+
+    # Nationalism of governing party
+    max_nationalism   = pmax(v2panas1, v2panas2, na.rm = TRUE),
+    min_nationalism   = pmin(v2panas1, v2panas2, na.rm = TRUE),
+    nationalism_dist  = abs(v2panas1 - v2panas2)  
+  ) %>%
+  select(-v2pariglef1, -v2pariglef2, -v2panas1, -v2panas2)
+```
+
