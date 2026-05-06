@@ -1,0 +1,780 @@
+---
+title: "METHOD IV PROJECT"
+author: "LABARTHE, S."
+date: '2026'
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+# 1. DATA
+```{r data, message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(rsample)
+library(tidymodels)
+library(glmnet)
+library(ranger)
+library(xgboost)
+library(ggplot2)
+library(tidyr)
+library(doParallel)
+
+set.seed(42)
+tidymodels_prefer()
+
+data <- read_rds("https://raw.githubusercontent.com/SimonLabarthe/Militarised-Interstate-Dispute-Predicted-Probabilities-Dataset/main/data.rds") %>%
+  rename(y = mid)
+
+data_split <- initial_split(data, prop = 0.9, strata = y)
+train <- training(data_split)
+test  <- testing(data_split)
+
+cat("Train:", nrow(train), "| Test:", nrow(test), "\n")
+cat("Class balance (train):\n")
+print(prop.table(table(train$y)) %>% round(3))
+
+# Models
+fit.logit <- readRDS("models/fit.logit.rds")
+fit.elnet <- readRDS("models/fit.elnet.rds")
+fit.rf <- readRDS("models/fit.rf.rds")
+fit.xgb <- readRDS("models/fit.xgb.rds")
+
+# Predictions
+preds <- readRDS("models/preds.rds")
+results <- readRDS("models/results.rds")
+
+tune_rf <- readRDS("models/tune_rf.rds")
+```
+
+---
+
+# 2. GLM FIT (no tuning needed)
+```{r fit_logit, message=FALSE, warning=FALSE}
+rec_base <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+spec_logit <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+wf_logit <- workflow() %>% 
+  add_recipe(rec_base)  %>% 
+  add_model(spec_logit)
+
+fit.logit <- wf_logit %>% 
+  fit(data = train)
+
+saveRDS(fit.logit, "models/fit.logit.rds")
+fit.logit
+```
+
+---
+
+# 3. HYPERPARAMETER TUNING
+## a. Elastic Net
+```{r tune_elnet, message=FALSE, warning=FALSE}
+# ID continuous variables
+continuous_cols <- train %>%
+  select(where(is.numeric)) %>%
+  select(where(~ length(unique(na.omit(.x))) > 2)) %>%
+  names()
+
+length(continuous_cols)
+print(continuous_cols)
+
+rec_elnet <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_poly(all_of(continuous_cols), degree = 2, keep_original_cols = FALSE) %>%
+  step_zv(all_predictors())
+
+spec_elnet <- logistic_reg(
+  penalty = tune(),   # L1+L2 regularisation strength
+  mixture = tune()    # 0 = ridge, 1 = lasso, 0.5 = elastic net
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+
+wf_elnet  <- workflow() %>% 
+  add_recipe(rec_elnet) %>% 
+  add_model(spec_elnet)
+
+# 5-fold CV, stratified on y
+cv_folds <- vfold_cv(train, v = 5, strata = y)
+
+# Parallelise all tuning
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+grid_elnet <- grid_regular(
+  penalty(range = c(-4, 0)),   # 10^-4 to 10^0
+  mixture(range = c(0, 1)),
+  levels = 6
+)
+
+tune_elnet <- tune_grid(
+  wf_elnet,
+  resamples = cv_folds,
+  grid      = grid_elnet,
+  metrics   = metric_set(roc_auc, accuracy, f_meas)
+)
+
+autoplot(tune_elnet) + 
+  labs(title = "Elastic Net — Hyperparameter Tuning") +
+  theme_bw()
+  
+best_elnet    <- select_best(tune_elnet, metric = "roc_auc")
+fit.elnet     <- finalize_workflow(wf_elnet, best_elnet) %>% fit(data = train)
+saveRDS(fit.elnet, "models/fit.elnet.rds")
+cat("Best elastic net — penalty:", best_elnet$penalty, 
+    " | mixture:", best_elnet$mixture, "\n")
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+## b. Random Forest — ROC AUC tuning
+```{r tune_rf, message=FALSE, warning=FALSE}
+rec_base <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+
+spec_rf <- rand_forest(
+  mtry  = tune(),     
+  trees = 100,
+  min_n = tune()     
+) %>%
+  set_engine("ranger", 
+             importance = "impurity", 
+             seed = 42, 
+             replace = FALSE,
+             sample_fraction = 0.5) %>%
+  set_mode("classification")
+
+wf_rf <- workflow() %>% 
+  add_recipe(rec_base)  %>% 
+  add_model(spec_rf)
+
+# 5-fold CV, stratified on y
+cv_folds <- bootstraps(train, times = 15, strata = y)
+
+# Parallelise all tuning
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+grid_rf <- grid_random(
+  mtry(range = c(3, 20)),
+  min_n(range = c(5, 50)),
+  size = 15
+)
+
+tune_rf <- tune_grid(
+  wf_rf,
+  resamples = cv_folds,
+  grid      = grid_rf,
+  metrics   = metric_set(roc_auc, accuracy, f_meas)
+)
+saveRDS("models/tune_rf.rds")
+
+autoplot(tune_rf) + 
+  labs(title = "Random Forest — Hyperparameter Tuning (ROC AUC)") +
+  theme_minimal()
+
+best_rf   <- select_best(tune_rf, metric = "roc_auc")
+fit.rf    <- finalize_workflow(wf_rf, best_rf) %>% fit(data = train)
+saveRDS(fit.rf, "models/fit.rf.rds")
+cat("Best RF — mtry:", best_rf$mtry, " | min_n:", best_rf$min_n, "\n")
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+## c. XGBoost
+```{r tune_xgb, message=FALSE, warning=FALSE}
+rec_base <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%                      
+  step_normalize(all_numeric_predictors())
+
+spec_xgb <- boost_tree(
+  trees      = 100,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  min_n      = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+wf_xgb    <- workflow() %>% 
+  add_recipe(rec_base)  %>% 
+  add_model(spec_xgb)
+
+grid_xgb <- grid_random(
+  tree_depth(range = c(3, 8)),
+  learn_rate(range = c(-3, -1)),  
+  min_n(range      = c(5, 50)),
+  size = 15
+)
+
+# 5-fold CV, stratified on y
+cv_folds <- bootstraps(train, times = 15, strata = y)
+
+# Parallelise all tuning
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+tune_xgb <- tune_grid(
+  wf_xgb,
+  resamples = cv_folds,
+  grid      = grid_xgb,
+  metrics   = metric_set(roc_auc, 
+                         accuracy, 
+                         f_meas)
+)
+
+autoplot(tune_xgb) + 
+  labs(title = "XGBoost — Hyperparameter Tuning") +
+  theme_minimal()
+
+best_xgb  <- select_best(tune_xgb, metric = "roc_auc")
+fit.xgb   <- finalize_workflow(wf_xgb, best_xgb) %>% fit(data = train)
+saveRDS(fit.xgb, "models/fit.xgb.rds")
+cat("Best XGBoost — depth:", best_xgb$tree_depth, 
+    " | lr:", round(best_xgb$learn_rate, 4),
+    " | min_n:", best_xgb$min_n, "\n")
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+## d. Support Vector Machine (SVM) !! TOO LONG TO COMPUTE
+```{r tune_svm, message=FALSE, warning=FALSE}
+library(kernlab)  # for SVM
+library(kknn)     # for KNN
+
+# Recipe for SVM (normalization is critical for SVM)
+rec_svm <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# SVM specification with RBF kernel
+spec_svm <- svm_rbf(
+  cost      = tune(),      # regularization parameter
+  rbf_sigma = tune()       # kernel parameter (gamma)
+) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+wf_svm <- workflow() %>% 
+  add_recipe(rec_svm) %>% 
+  add_model(spec_svm)
+
+# Tuning grid for SVM
+grid_svm <- grid_regular(
+  cost(range = c(-2, 2)),      # 0.01 to 100
+  rbf_sigma(range = c(-3, 1)), # 0.001 to 10
+  levels = 6
+)
+
+# 5-fold CV stratified on y
+cv_folds_svm <- vfold_cv(train, v = 2, strata = y)
+
+# Setup parallelization
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+tune_svm <- tune_grid(
+  wf_svm,
+  resamples = cv_folds_svm,
+  grid      = grid_svm,
+  metrics   = metric_set(roc_auc, accuracy, f_meas),
+  control   = control_grid(verbose = FALSE)
+)
+
+autoplot(tune_svm) + 
+  labs(title = "SVM (RBF Kernel) — Hyperparameter Tuning") +
+  theme_bw()
+
+best_svm  <- select_best(tune_svm, metric = "roc_auc")
+fit.svm   <- finalize_workflow(wf_svm, best_svm) %>% fit(data = train)
+saveRDS(fit.svm, "models/fit.svm.rds")
+cat("Best SVM — cost:", round(best_svm$cost, 3), 
+    " | rbf_sigma:", round(best_svm$rbf_sigma, 4), "\n")
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+## e. K-Nearest Neighbors (KNN)
+```{r}
+
+# Recipe for KNN (normalization is critical due to distance-based algorithm)
+rec_knn <- recipe(y ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# KNN specification
+spec_knn <- nearest_neighbor(
+  neighbors = tune(),      # k: number of neighbors
+  weight_func = tune()     # weighting function (e.g., "rectangular", "triangular", "epanechnikov")
+) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+wf_knn <- workflow() %>% 
+  add_recipe(rec_knn) %>% 
+  add_model(spec_knn)
+
+# Tuning grid for KNN
+grid_knn <- grid_regular(
+  neighbors(range = c(3, 51)),     # odd numbers preferred to avoid ties
+  weight_func(),
+  levels = c(neighbors = 12, weight_func = 5)
+)
+
+# 5-fold CV stratified on y
+cv_folds_knn <- vfold_cv(train, v = 2, strata = y)
+
+# Parallelization
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+tune_knn <- tune_grid(
+  wf_knn,
+  resamples = cv_folds_knn,
+  grid      = grid_knn,
+  metrics   = metric_set(roc_auc, accuracy, f_meas),
+  control   = control_grid(verbose = FALSE)
+)
+
+autoplot(tune_knn) + 
+  labs(title = "KNN — Hyperparameter Tuning") +
+  theme_bw()
+
+best_knn   <- select_best(tune_knn, metric = "roc_auc")
+fit.knn    <- finalize_workflow(wf_knn, best_knn) %>% fit(data = train)
+saveRDS(fit.knn, "models/fit.knn.rds")
+cat("Best KNN — neighbors:", best_knn$neighbors, 
+    " | weight_func:", best_knn$weight_func, "\n")
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+---
+
+# 4. TEST SET PREDICTIONS
+
+```{r predictions_updated}
+# Helper functions
+get_class <- function(fit) predict(fit, new_data = test, type = "class")$.pred_class
+get_prob  <- function(fit) predict(fit, new_data = test, type = "prob")$.pred_1
+
+preds <- tibble(
+  truth      = test$y,
+  # classes
+  logit_cls  = get_class(fit.logit),
+  elnet_cls  = get_class(fit.elnet),
+  rf_cls     = get_class(fit.rf),
+  xgb_cls    = get_class(fit.xgb),
+  #svm_cls    = get_class(fit.svm),
+  #knn_cls    = get_class(fit.knn),
+  # probabilities of class "1" (MID = 1)
+  logit_prob = get_prob(fit.logit),
+  elnet_prob = get_prob(fit.elnet),
+  rf_prob    = get_prob(fit.rf),
+  xgb_prob   = get_prob(fit.xgb),
+  #svm_prob   = get_prob(fit.svm),
+  #knn_prob   = get_prob(fit.knn)
+)
+
+saveRDS(preds, "models/preds.rds")
+```
+
+---
+
+# 5. EVALUATION
+
+## a. Confusion Matrices
+
+```{r conf_matrices}
+models <- c("logit", "elnet", "rf", "xgb")
+labels <- c("Logistic", "Elastic Net", "Random Forest", "XGBoost")
+
+for (i in seq_along(models)) {
+  cat("\n───", labels[i], "───\n")
+  cls_col <- paste0(models[i], "_cls")
+  print(conf_mat(preds, truth = truth, estimate = !!sym(cls_col))$table)
+}
+```
+
+```{r conf_matrices_figure, fig.width=12, fig.height=10}
+library(ggplot2)
+library(paletteer)
+plot_confusion_matrix_plasma_pct <- function(model_name, model_label, preds_df) {
+  cls_col <- paste0(model_name, "_cls")
+  
+  cm_table <- conf_mat(preds_df, truth = truth, estimate = !!sym(cls_col))$table
+  cm_df <- as.data.frame(cm_table)
+  colnames(cm_df) <- c("Truth", "Prediction", "Freq")
+  
+  cm_df$Truth <- as.character(cm_df$Truth)
+  cm_df$Prediction <- as.character(cm_df$Prediction)
+  
+  # Calculate row percentages
+  cm_df <- cm_df %>%
+    group_by(Truth) %>%
+    mutate(Percentage = Freq / sum(Freq) * 100,
+           Label = paste0(Freq, "\n(", round(Percentage, 1), "%)"))
+  
+  ggplot(cm_df, aes(x = Prediction, y = Truth, fill = Percentage)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = Label), size = 5, fontface = "bold", color = "white") +
+    scale_fill_paletteer_c("grDevices::Inferno", 
+                           name = "Row\nPercentage (%)",
+                           limits = c(0, 100)) +
+    scale_x_discrete(position = "top") +
+    labs(title = model_label,
+         x = "Truth",
+         y = "Predicted MID") +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text = element_text(size = 11, face = "bold"),
+      axis.title = element_text(size = 11),
+      panel.grid = element_blank(),
+      legend.position = "right",
+      legend.key.width = unit(0.5, "cm"),
+      legend.key.height = unit(1.5, "cm")
+    ) +
+    coord_fixed()
+}
+
+# Create plots with percentage fill
+p1_pct <- plot_confusion_matrix_plasma_pct("logit", "Logistic", preds)
+p2_pct <- plot_confusion_matrix_plasma_pct("elnet", "Elastic Net", preds)
+p3_pct <- plot_confusion_matrix_plasma_pct("rf", "Random Forest", preds)
+p4_pct <- plot_confusion_matrix_plasma_pct("xgb", "XGBoost", preds)
+
+# Combine
+library(patchwork)
+combined_plot_pct <- (wrap_elements(p1_pct) + wrap_elements(p2_pct)) /
+                     (wrap_elements(p3_pct) + wrap_elements(p4_pct)) +
+  plot_annotation(
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40")
+    )
+  ) &
+  theme(legend.position = "right")
+
+# Save
+pdf("graphs/confusion_matrices_plasma_pct.pdf", width = 12, height = 6)
+print(combined_plot_pct)
+dev.off()
+
+combined_plot_pct
+```
+
+
+## b. Accuracy, Precision, Recall per model
+
+```{r metrics_table}
+get_metrics <- function(cls_col, prob_col, model_name) {
+  tibble(
+    Model     = model_name,
+    Accuracy  = accuracy(preds,  truth, estimate = !!sym(cls_col))$.estimate,
+    Precision = precision(preds, truth, estimate = !!sym(cls_col),
+                          event_level = "second")$.estimate,
+    Recall    = recall(preds,    truth, estimate = !!sym(cls_col),
+                       event_level = "second")$.estimate,
+    F1        = f_meas(preds,    truth, estimate = !!sym(cls_col),
+                       event_level = "second")$.estimate,
+    AUC       = roc_auc(preds,   truth, !!sym(prob_col),
+                        event_level = "second")$.estimate
+  )
+}
+
+results <- bind_rows(
+  get_metrics("logit_cls", "logit_prob", "Logistic"),
+  get_metrics("elnet_cls", "elnet_prob", "Elastic Net"),
+  get_metrics("rf_cls",    "rf_prob",    "Random Forest"),
+  get_metrics("xgb_cls",   "xgb_prob",  "XGBoost")
+) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+saveRDS(results, "models/results.rds")
+
+library(stargazer)
+stargazer(results, 
+          summary = FALSE,
+          rownames = FALSE,
+          title = "Model Performance Comparison",
+          digits = 3,
+          type = "latex")
+```
+
+## c. ROC Curves — all models
+
+```{r roc_curves, fig.width=8, fig.height=6}
+# Build tidy ROC data for all four models
+roc_data <- bind_rows(
+  roc_curve(preds, truth, logit_prob, event_level = "second") %>% mutate(model = "Logistic"),
+  roc_curve(preds, truth, elnet_prob, event_level = "second") %>% mutate(model = "Elastic Net"),
+  roc_curve(preds, truth, rf_prob,    event_level = "second") %>% mutate(model = "Random Forest"),
+  roc_curve(preds, truth, xgb_prob,   event_level = "second") %>% mutate(model = "XGBoost")
+)
+
+# Add AUC to legend labels
+auc_labels <- results %>%
+  mutate(label = paste0(Model, "  (AUC = ", round(AUC, 3), ")")) %>%
+  select(model = Model, label)
+
+model_colors <- paletteer_c("grDevices::Inferno", n = 4)
+names(model_colors) <- levels(results_long$Model)
+
+roc_data <- roc_data %>% left_join(auc_labels, by = "model")
+
+pdf("graphs/roc_curves.pdf", width = 10, height = 6)
+ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity, colour = model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  scale_colour_manual(
+    values = model_colors,
+    labels = setNames(auc_labels$label, auc_labels$model),
+    name = NULL
+  ) +
+  labs(
+    x       = "False Positive Rate (1 − Specificity)",
+    y       = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = c(0.75, 0.25),
+    legend.background = element_rect(fill = "white", linewidth = 0.2),
+    legend.text = element_text(size = 9),
+    legend.key.size = unit(0.8, "cm")
+  )
+
+dev.off()
+```
+
+## d. Performance Barplots — Accuracy, Precision, Recall
+```{r barplots, fig.width=12, fig.height=5}
+library(paletteer)
+
+results_long <- results %>%
+  pivot_longer(-Model, names_to = "Metric", values_to = "Value") %>%
+  filter(Metric %in% c("Accuracy", "Precision", "Recall", "AUC")) %>%
+  mutate(Metric = factor(Metric, levels = c("Accuracy", "Precision", "Recall", "AUC")),
+         Model  = factor(Model,  levels = c("Logistic", "Elastic Net",
+                                            "Random Forest", "XGBoost")))
+
+# Generate plasma colors for models
+model_colors <- paletteer_c("grDevices::Inferno", n = 4)
+names(model_colors) <- levels(results_long$Model)
+
+pdf("graphs/comparison_plasma.pdf", width = 10, height = 6)
+comparison_short <- ggplot(results_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = round(Value, 3)),
+            vjust = -0.5, size = 3.8, fontface = "bold") +
+  facet_wrap(~ Metric) +
+  scale_fill_manual(values = model_colors) +
+  scale_y_continuous(limits = c(0, 1.08)) +
+  labs(
+    x     = NULL,
+    y     = NULL
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold")
+  )
+dev.off()
+
+comparison_short
+```
+
+---
+
+# 6. TUNING RANDOM FOREST
+```{r}
+library(paletteer)
+
+# Extract tuning results
+rf_tune_results <- tune_rf %>% 
+  collect_metrics() %>%
+  filter(.metric == "roc_auc")
+
+# Create a continuous palette for min_n values
+# First, get unique min_n values sorted
+min_n_values <- sort(unique(rf_tune_results$min_n))
+
+# Generate colors from viridis plasma
+plasma_colors <- paletteer_c("viridis::plasma", n = length(min_n_values))
+names(plasma_colors) <- min_n_values
+
+ggplot(rf_tune_results, 
+       aes(x = mtry, 
+           y = mean, 
+           color = factor(min_n),
+           group = min_n)) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = plasma_colors, name = "min_n") +
+  labs(
+    title = "Random Forest — Hyperparameter Tuning",
+    subtitle = "ROC AUC by mtry and min_n (Viridis Plasma)",
+    x = "mtry (Number of Variables Tried at Each Split)",
+    y = "ROC AUC"
+  ) +
+  scale_y_continuous(limits = c(0.70, 0.73), 
+                     breaks = seq(0.70, 0.73, by = 0.002)) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40"),
+    legend.position = "right",
+    panel.grid.minor = element_blank(),
+    legend.title = element_text(face = "bold")
+  )
+```
+
+
+# 7. VARIABLE IMPORTANCE (RF)
+
+```{r var_importance, fig.width=9, fig.height=6}
+library(paletteer)
+library(ggplot2)
+library(dplyr)
+library(labelled)
+
+rf_engine <- fit.rf %>% 
+  extract_fit_engine()
+
+p <- 20
+
+# Direct extraction of labels from your data object
+importance_df <- tibble(
+  variable   = names(rf_engine$variable.importance),
+  importance = rf_engine$variable.importance
+) %>%
+  slice_max(importance, n = p) %>%
+  # Get labels directly using labelled package
+  mutate(variable_label = sapply(variable, function(x) {
+    lbl <- attr(data[[x]], "label")
+    if(is.null(lbl)) x else lbl
+  }))
+
+plasma_colors <- paletteer_c("grDevices::Inferno", n = p)
+
+pdf("graphs/importance.pdf", width = 12, height = 6)  
+importance <- ggplot(importance_df, aes(x = importance, 
+                           y = reorder(variable_label, importance),
+                           fill = importance)) +
+  geom_col(width = 0.7) +
+  scale_fill_gradientn(colors = plasma_colors, name = "Importance") +
+  labs(x = "Mean Decrease in Gini Impurity",
+       y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        axis.text.y = element_text(size = 10, hjust = 1))
+print(importance)
+dev.off()
+
+importance
+```
+
+# 8. DATASET
+```{r}
+library(countrycode)
+library(peacesciencer)
+library(dplyr)
+library(tidyr)
+
+dyad_base <- create_dyadyears(
+  system   = "cow",   
+  directed = FALSE,     
+  subset_years = c(1992:2012)  
+) %>%
+  mutate(
+    country_i = countrycode(ccode1, "cown", "country.name"),
+    country_j = countrycode(ccode2, "cown", "country.name"),
+    dyad_id = paste0(pmin(country_i, country_j), "-", 
+                       pmax(country_i, country_j))
+  ) %>%
+  mutate(
+    country_i = as.character(country_i),
+    country_j = as.character(country_j)
+  )
+
+mona_base <- create_stateyears(
+  system   = "cow",   
+  subset_years = c(1992:2012)  
+) %>%
+  mutate(
+    country = countrycode(ccode, "cown", "country.name"),
+    country = as.character(country)
+  )
+
+train_preds <- predict(fit.rf, new_data = train, type = "prob")$.pred_1
+test_preds <- preds$rf_prob  
+
+all_predictions <- bind_rows(
+  train %>% select(y, country1, country2, dyad_id, year) %>% mutate(mid_p_hat = train_preds),
+  test %>% select(y, country1, country2, dyad_id, year) %>% mutate(mid_p_hat = test_preds)
+)
+
+all_data_with_preds <- data %>%
+  mutate(mid_p_hat = predict(fit.rf, new_data = data, type = "prob")$.pred_1) %>%
+  select(dyad_id, country1, country2, year, mid_p_hat)
+
+dyad_data <- dyad_base %>%
+  left_join(
+    all_data_with_preds %>% 
+      mutate(country1 = as.character(country1),
+             country2 = as.character(country2)),
+    by = c("country_i" = "country1", 
+           "country_j" = "country2", 
+           "year" = "year")
+  ) %>% 
+  select(country_i, 
+         country_j, 
+         dyad_id = dyad_id.x, 
+         year, 
+         mid_p_hat) %>% 
+  arrange(country_i, country_j, year)
+
+monad_data <- dyad_data %>%
+  filter(!is.na(mid_p_hat)) %>%
+  pivot_longer(cols = c(country_i, country_j),
+               values_to = "country") %>%
+  group_by(country, year) %>%
+  summarise(
+    mid_p_hat = 1 - prod(1 - mid_p_hat),
+    n_dyads = n(),
+    .groups = "drop"
+  ) %>%
+  right_join(mona_base, by = c("country", "year")) %>%
+  arrange(country, year) %>% 
+  select(country, 
+         year, 
+         mid_p_hat)
+
+saveRDS(dyad_data, "dyad_data.rds")
+saveRDS(monad_data, "monad_data.rds")
+```
+
+
+
+
+
+
+
